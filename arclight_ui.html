@@ -1,0 +1,1170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arclight — Face Recognition</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Syne:wght@400;700;800&display=swap');
+
+  :root {
+    --bg:        #080c0a;
+    --surface:   #0f1511;
+    --surface2:  #161d18;
+    --border:    #1f2e23;
+    --green:     #00ff88;
+    --green-dim: #00ff8840;
+    --green-glow:#00ff8820;
+    --red:       #ff3c5a;
+    --blue:      #38bdf8;
+    --text:      #c8d8cc;
+    --muted:     #4a5e50;
+    --mono:      'Share Tech Mono', monospace;
+    --sans:      'Syne', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  html, body {
+    height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    overflow: hidden;
+  }
+
+  /* ── scanline overlay ── */
+  body::before {
+    content: '';
+    position: fixed; inset: 0;
+    background: repeating-linear-gradient(
+      0deg, transparent, transparent 2px,
+      rgba(0,255,136,0.015) 2px, rgba(0,255,136,0.015) 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+  }
+
+  /* ════════════════════════════════════════
+     LAYOUT
+  ════════════════════════════════════════ */
+  #app {
+    display: grid;
+    grid-template-columns: 140px 1fr 220px; 
+    grid-template-rows: 48px 1fr;
+    height: 100vh;
+    gap: 0;
+  }
+
+  /* ── Topbar ── */
+  #topbar {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 0 20px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+  }
+
+  #topbar .logo {
+    font-family: var(--sans);
+    font-weight: 800;
+    font-size: 15px;
+    color: var(--green);
+    letter-spacing: 3px;
+  }
+
+  #topbar .sub {
+    font-size: 10px;
+    color: var(--muted);
+    letter-spacing: 2px;
+  }
+
+  #topbar .spacer { flex: 1; }
+
+  #cam-status {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 10px; color: var(--muted);
+  }
+
+  #cam-dot {
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--red);
+    transition: background .4s;
+  }
+  #cam-dot.on { background: var(--green); box-shadow: 0 0 8px var(--green); }
+
+  /* ── Sidebar ── */
+  #sidebar {
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 16px 12px;
+    gap: 4px;
+    overflow-y: auto;
+  }
+
+  .sidebar-label {
+    font-size: 9px;
+    color: var(--muted);
+    letter-spacing: 2px;
+    padding: 8px 4px 4px;
+  }
+
+  /* nav tabs */
+  .nav-btn {
+    display: flex; align-items: center; gap: 8px;
+    padding: 9px 10px;
+    border-radius: 4px;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 11px;
+    cursor: pointer;
+    text-align: left;
+    transition: background .15s, color .15s;
+    letter-spacing: .5px;
+  }
+  .nav-btn:hover { background: var(--surface2); color: var(--text); }
+  .nav-btn.active {
+    background: var(--green-glow);
+    color: var(--green);
+    border-left: 2px solid var(--green);
+    padding-left: 8px;
+  }
+  .nav-btn .icon { font-size: 13px; }
+
+  .sidebar-divider {
+    height: 1px; background: var(--border);
+    margin: 8px 0;
+  }
+
+  #enrolled-count {
+    font-size: 10px; color: var(--muted);
+    padding: 4px 4px 0;
+  }
+  
+  /* log entries */
+  .log-entry {
+  display: grid;
+  grid-template-columns: 70px 1fr 44px;
+  gap: 0;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 10px;
+  animation: fadeIn 0.4s ease forwards;
+  transition: background .2s;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(-8px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Main area ── */
+  #main {
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* Panels */
+  .panel { display: none; height: 100%; overflow: hidden; flex-direction: column; }
+  .panel.active { display: flex; }
+
+  /* ════════════════════════════════════════
+     RECOGNITION PANEL
+  ════════════════════════════════════════ */
+  #panel-recognize {
+    padding: 16px;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 12px;
+  }
+
+  #video-container {
+    position: relative;
+    width: 100%;
+    max-width: 640px;
+    aspect-ratio: 4/3;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+    flex-shrink: 0;
+  }
+
+  #video-feed {
+    width: 100%; height: 100%;
+    object-fit: cover;
+    display: block;
+  }
+
+  #video-placeholder {
+    position: absolute; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    gap: 8px;
+    color: var(--muted); font-size: 11px;
+  }
+
+  #video-placeholder .cam-icon {
+    font-size: 32px; opacity: .3;
+  }
+
+  #controls {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    width: 100%; max-width: 640px;
+  }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px;
+    border: none; border-radius: 3px;
+    font-family: var(--mono); font-size: 11px;
+    cursor: pointer; transition: opacity .15s, transform .1s;
+    letter-spacing: .5px;
+  }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .35; cursor: default; }
+
+  .btn-green  { background: var(--green); color: #080c0a; font-weight: bold; }
+  .btn-red    { background: transparent; color: var(--red); border: 1px solid var(--red); }
+  .btn-ghost  { background: transparent; color: var(--blue); border: 1px solid #1e3a4a; }
+  .btn-danger { background: transparent; color: var(--red); border: 1px solid #2a1520; }
+  .btn-outline { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+
+  /* ════════════════════════════════════════
+     FACE MANAGER PANEL
+  ════════════════════════════════════════ */
+  #panel-faces {
+    padding: 20px;
+    overflow-y: auto;
+    gap: 16px;
+  }
+
+  .panel-title {
+    font-family: var(--sans);
+    font-size: 18px; font-weight: 700;
+    color: #fff;
+    letter-spacing: 1px;
+    flex-shrink: 0;
+  }
+
+  .panel-title span { color: var(--green); }
+
+  /* face grid */
+  #face-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 8px;
+  }
+
+  .face-card {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 14px 12px;
+    cursor: pointer;
+    transition: border-color .15s, background .15s;
+    position: relative;
+  }
+  .face-card:hover { border-color: var(--green-dim); background: var(--surface); }
+  .face-card.selected {
+    border-color: var(--green);
+    background: var(--green-glow);
+  }
+
+  .face-card .fc-name {
+    font-size: 12px; color: var(--text); margin-bottom: 4px;
+  }
+  .face-card .fc-dims {
+    font-size: 9px; color: var(--muted);
+  }
+  .face-card .fc-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--green);
+    position: absolute; top: 10px; right: 10px;
+  }
+
+  .face-actions {
+    display: flex; gap: 8px; flex-wrap: wrap;
+    flex-shrink: 0;
+  }
+
+  /* enrollment overlay */
+  #enroll-overlay {
+    display: none;
+    position: fixed; inset: 0;
+    background: rgba(8,12,10,.92);
+    z-index: 100;
+    align-items: center; justify-content: center;
+  }
+  #enroll-overlay.show { display: flex; }
+
+  #enroll-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    width: 460px;
+    padding: 24px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+
+  #enroll-title {
+    font-family: var(--sans);
+    font-size: 16px; font-weight: 700;
+    color: var(--green);
+  }
+
+  #enroll-video-wrap {
+    position: relative;
+    width: 100%; aspect-ratio: 4/3;
+    background: #000;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+  #enroll-video { width: 100%; height: 100%; object-fit: cover; }
+
+  #enroll-progress-bar {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+  #enroll-progress-fill {
+    height: 100%;
+    background: var(--green);
+    transition: width .1s;
+    width: 0%;
+  }
+
+  #enroll-msg { font-size: 11px; color: var(--muted); }
+  #enroll-msg.success { color: var(--green); }
+  #enroll-msg.error   { color: var(--red); }
+
+  #enroll-btns { display: flex; gap: 8px; }
+
+  /* ════════════════════════════════════════
+     RIGHT LOG PANEL
+  ════════════════════════════════════════ */
+  #log-panel {
+    background: var(--surface);
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow: hidden;
+  }
+
+  #log-header {
+    display: flex; align-items: center;
+    padding: 12px 14px 10px;
+    border-bottom: 1px solid var(--border);
+    gap: 8px;
+  }
+
+  #log-header h3 {
+    font-size: 10px; letter-spacing: 2px;
+    color: var(--green);
+  }
+
+  #log-count {
+    font-size: 9px; color: var(--muted);
+  }
+
+  #log-list {
+    flex: 1; overflow-y: auto;
+    padding: 4px 0;
+  }
+
+  .log-entry {
+    display: grid;
+    grid-template-columns: 70px 1fr 44px;
+    gap: 0;
+    padding: 7px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 10px;
+    animation: fadeSlide .3s ease;
+    transition: background .2s;
+  }
+  .log-entry:hover { background: var(--surface2); }
+
+  .log-entry .le-time { color: var(--muted); }
+  .log-entry .le-name { color: var(--text); font-size: 11px; }
+  .log-entry .le-conf { color: var(--green); text-align: right; }
+  .log-entry.updated .le-conf { color: var(--blue); }
+
+  @keyframes fadeSlide {
+    from { opacity: 0; transform: translateX(10px); }
+    to   { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ── Scrollbars ── */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* ── Input dialog ── */
+  #dialog-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(8,12,10,.88);
+    z-index: 200; align-items: center; justify-content: center;
+  }
+  #dialog-overlay.show { display: flex; }
+
+  #dialog-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 24px;
+    width: 340px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+
+  #dialog-box h3 {
+    font-family: var(--sans); font-size: 15px;
+    font-weight: 700; color: var(--green);
+  }
+
+  #dialog-box p { font-size: 11px; color: var(--muted); }
+
+  #dialog-input {
+    background: var(--surface2);
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    padding: 9px 12px;
+    width: 100%;
+    outline: none;
+    transition: border-color .15s;
+  }
+  #dialog-input:focus { border-color: var(--green); }
+
+  #dialog-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ── Confirm dialog ── */
+  #confirm-overlay {
+    display: none; position: fixed; inset: 0;
+    background: rgba(8,12,10,.88);
+    z-index: 200; align-items: center; justify-content: center;
+  }
+  #confirm-overlay.show { display: flex; }
+
+  #confirm-box {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 24px;
+    width: 320px;
+    display: flex; flex-direction: column; gap: 16px;
+  }
+
+  #confirm-box h3 {
+    font-family: var(--sans); font-size: 14px;
+    font-weight: 700; color: #fff;
+  }
+
+  #confirm-box p { font-size: 11px; color: var(--muted); }
+  #confirm-btns { display: flex; gap: 8px; justify-content: flex-end; }
+
+  /* ── Toast ── */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--green);
+    padding: 10px 16px;
+    font-size: 11px; color: var(--text);
+    border-radius: 4px;
+    transform: translateY(60px);
+    opacity: 0;
+    transition: transform .3s, opacity .3s;
+    z-index: 300;
+    max-width: 280px;
+  }
+  #toast.show { transform: translateY(0); opacity: 1; }
+  #toast.error { border-left-color: var(--red); }
+
+  /* ── Empty state ── */
+  .empty-state {
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    height: 200px; gap: 8px;
+    color: var(--muted); font-size: 11px;
+  }
+  .empty-state .big { font-size: 28px; opacity: .3; }
+    /* Tablet — collapse sidebar, shrink log panel */
+  /* ── 800×480 (RPi Touchscreen) ── */
+
+  @media (max-width: 800px) and (max-height: 480px),
+        (max-width: 800px) {
+
+      #app {
+           grid-template-columns: 140px 1fr 160px; 
+      }
+
+      /* ── Topbar — compact ── */
+      #topbar {
+          padding: 0 12px;
+          grid-column: 1 / -1;
+      }
+      #topbar .logo  { font-size: 12px; letter-spacing: 2px; }
+      #topbar .sub   { display: none; }
+      #cam-label     { display: none; }
+
+      /* ── Sidebar ── */
+      #sidebar {
+          width: 140px;
+          padding: 10px 8px;
+          gap: 2px;
+          overflow: hidden;
+      }
+
+      /* Remove these two — let text show again */
+      /* .sidebar-label, */
+      /* .nav-btn span:last-child, */
+
+     #enrolled-count { 
+          display: block;
+          font-size: 9px;
+          padding: 4px 8px;
+      }
+      .nav-btn {
+          justify-content: flex-start;    /* back to left-aligned */
+          padding: 8px 8px;
+          font-size: 10px;
+          letter-spacing: 0.5px;
+      }
+
+      .sidebar-label {
+          font-size: 8px;
+          letter-spacing: 1.5px;
+      }
+
+      /* ── Recognition panel ── */
+      #panel-recognize {
+          padding: 8px;
+          gap: 6px;
+          align-items: flex-start;
+          justify-content: flex-start;
+          overflow: hidden;
+      }
+
+      /* Camera fills available height */
+      #video-container {
+          width: 100%;
+          max-width: 100%;
+          /* 480 - 40px topbar - 44px controls - 16px padding = ~380px */
+          height: calc(100vh - 40px - 44px - 22px);
+          aspect-ratio: unset;
+      }
+
+      #video-feed {
+          width: 100%;
+          height: 100%;
+          object-fit: cover;
+      }
+
+      /* ── Controls row — compact ── */
+      #controls {
+          max-width: 100%;
+          gap: 4px;
+          flex-wrap: nowrap;
+      }
+
+      .btn {
+          padding: 6px 10px;
+          font-size: 10px;
+          gap: 4px;
+      }
+
+      /* ── Log panel — narrow ── */
+      #log-panel {
+          width: 160px;
+      }
+
+      #log-header {
+          padding: 8px 6px;
+          justify-content: center;
+      }
+
+      #log-header h3 {
+          display: none;
+      }
+
+      #log-count {
+          font-size: 10px;
+          color: var(--green);
+          text-align: center;
+          width: 100%;
+      }
+
+      .log-entry {
+          grid-template-columns: 55px 1fr 34px;
+          padding: 5px 6px;
+          font-size: 9px;
+      }
+
+      .log-entry .le-name { font-size: 9px; }
+
+      /* ── Face manager panel ── */
+      #panel-faces {
+          padding: 10px;
+          gap: 10px;
+      }
+
+      .panel-title { font-size: 14px; }
+
+      .face-actions { gap: 4px; }
+
+      #face-grid {
+          grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+          gap: 6px;
+      }
+
+      .face-card {
+          padding: 10px 8px;
+      }
+
+      .face-card .fc-name { font-size: 11px; }
+
+      /* ── Enrollment overlay ── */
+      #enroll-box {
+          width: 380px;
+          padding: 16px;
+          gap: 10px;
+      }
+
+      #enroll-video-wrap {
+          height: 240px;
+      }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- ── TOPBAR ── -->
+  <header id="topbar">
+    <span class="logo">ARCLIGHT</span>
+    <span class="sub">FACE RECOGNITION SYSTEM</span>
+    <div class="spacer"></div>
+    <div id="cam-status">
+      <div id="cam-dot"></div>
+      <span id="cam-label">CAMERA OFF</span>
+    </div>
+  </header>
+
+  <!-- ── SIDEBAR ── -->
+  <nav id="sidebar">
+    <div class="sidebar-label">NAVIGATION</div>
+    <button class="nav-btn active" data-panel="recognize" onclick="switchPanel('recognize',this)">
+      <span class="icon">◉</span> Recognize
+    </button>
+    <button class="nav-btn" data-panel="faces" onclick="switchPanel('faces',this)">
+      <span class="icon">⊞</span> Manage Faces
+    </button>
+    <div class="sidebar-divider"></div>
+    <div class="sidebar-label">DATABASE</div>
+    <div id="enrolled-count">— people enrolled</div>
+  </nav>
+
+  <!-- ── MAIN ── -->
+  <main id="main">
+
+    <!-- RECOGNITION PANEL -->
+    <section id="panel-recognize" class="panel active">
+      <div id="video-container">
+        <img id="video-feed" alt="" style="display:none">
+        <div id="video-placeholder">
+          <div class="cam-icon">⊙</div>
+          <span>Press START to begin recognition</span>
+        </div>
+      </div>
+      <div id="controls">
+        <button class="btn btn-green" id="btn-start" onclick="startCamera()">▶ START</button>
+        <button class="btn btn-red"   id="btn-stop"  onclick="stopCamera()" disabled>■ STOP</button>
+        <button class="btn btn-ghost"              onclick="exportLogs()">↓ EXPORT LOGS</button>
+        <button class="btn btn-danger"             onclick="clearLogs()">✕ CLEAR LOG</button>
+      </div>
+    </section>
+
+    <!-- FACE MANAGER PANEL -->
+    <section id="panel-faces" class="panel">
+      <div class="panel-title">Manage <span>Faces</span></div>
+      <div class="face-actions">
+        <button class="btn btn-green" onclick="openAddDialog()">＋ ADD FACE</button>
+        <button class="btn btn-outline" id="btn-update" onclick="openUpdateDialog()" disabled>✎ UPDATE</button>
+        <button class="btn btn-danger"  id="btn-delete" onclick="deleteFace()" disabled>✕ DELETE</button>
+        <button class="btn btn-outline" onclick="refreshFaces()">↺ REFRESH</button>
+      </div>
+      <div id="face-grid">
+        <div class="empty-state">
+          <div class="big">⊞</div>
+          <span>Loading enrolled faces...</span>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ── LOG PANEL ── -->
+  <aside id="log-panel">
+    <div id="log-header">
+      <h3>ATTENDANCE LOG</h3>
+      <span id="log-count">0 entries</span>
+    </div>
+    <div id="log-list"></div>
+  </aside>
+
+</div>
+
+<!-- ── ENROLL OVERLAY ── -->
+<div id="enroll-overlay">
+  <div id="enroll-box">
+    <div id="enroll-title">Enrolling Face</div>
+    <div id="enroll-video-wrap">
+      <img id="enroll-video" alt="">
+    </div>
+    <div id="enroll-progress-bar">
+      <div id="enroll-progress-fill"></div>
+    </div>
+    <div id="enroll-msg">Ready...</div>
+    <div id="enroll-btns">
+      <button class="btn btn-green" id="enroll-confirm-btn" onclick="startEnrollCapture()">⬤ START CAPTURE</button>
+      <button class="btn btn-outline" onclick="cancelEnroll()">✕ CANCEL</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── INPUT DIALOG ── -->
+<div id="dialog-overlay">
+  <div id="dialog-box">
+    <h3 id="dialog-title">Enter Name</h3>
+    <p id="dialog-desc"></p>
+    <input id="dialog-input" type="text" placeholder="Full name..." autocomplete="off">
+    <div id="dialog-btns">
+      <button class="btn btn-outline" onclick="dialogCancel()">Cancel</button>
+      <button class="btn btn-green"   onclick="dialogConfirm()">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── CONFIRM DIALOG ── -->
+<div id="confirm-overlay">
+  <div id="confirm-box">
+    <h3 id="confirm-title">Confirm</h3>
+    <p id="confirm-msg"></p>
+    <div id="confirm-btns">
+      <button class="btn btn-outline" onclick="confirmNo()">Cancel</button>
+      <button class="btn btn-danger"  onclick="confirmYes()">Delete</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── TOAST ── -->
+<div id="toast"></div>
+
+<script>
+// ════════════════════════════════════════════════════════
+//  STATE
+// ════════════════════════════════════════════════════════
+let selectedFace = null;
+let dialogResolve = null;
+let confirmResolve = null;
+let enrollPollInterval = null;
+let enrollPendingMode = null;
+let enrollPendingName = null;
+let enrollCapturing = false;
+let logPollInterval = null;
+
+// ════════════════════════════════════════════════════════
+//  INIT
+// ════════════════════════════════════════════════════════
+document.addEventListener('DOMContentLoaded', () => {
+  refreshFaces();
+  loadExistingLogs();
+});
+
+// ════════════════════════════════════════════════════════
+//  PANEL SWITCHING
+// ════════════════════════════════════════════════════════
+function switchPanel(id, btn) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('panel-' + id).classList.add('active');
+  btn.classList.add('active');
+  if (id === 'faces') refreshFaces();
+}
+
+// ════════════════════════════════════════════════════════
+//  CAMERA CONTROL + POLLING
+// ════════════════════════════════════════════════════════
+async function startCamera() {
+  const res = await fetch('/api/camera/start', { method: 'POST' });
+  if (!res.ok) { 
+    toast('Failed to open camera', true); 
+    return; 
+  }
+
+  document.getElementById('video-feed').src = '/video_feed?' + Date.now();
+  document.getElementById('video-feed').style.display = 'block';
+  document.getElementById('video-placeholder').style.display = 'none';
+  document.getElementById('btn-start').disabled = true;
+  document.getElementById('btn-stop').disabled  = false;
+  document.getElementById('cam-dot').classList.add('on');
+  document.getElementById('cam-label').textContent = 'CAMERA ON';
+
+  // Start live polling
+  if (logPollInterval) clearInterval(logPollInterval);
+  logPollInterval = setInterval(pollRecentLogs, 2000);   // 2 seconds - stable
+}
+
+async function stopCamera() {
+  await fetch('/api/camera/stop', { method: 'POST' });
+  
+  document.getElementById('video-feed').src = '';
+  document.getElementById('video-feed').style.display = 'none';
+  document.getElementById('video-placeholder').style.display = 'flex';
+  document.getElementById('btn-start').disabled = false;
+  document.getElementById('btn-stop').disabled  = true;
+  document.getElementById('cam-dot').classList.remove('on');
+  document.getElementById('cam-label').textContent = 'CAMERA OFF';
+
+  if (logPollInterval) {
+    clearInterval(logPollInterval);
+    logPollInterval = null;
+  }
+}
+
+// ════════════════════════════════════════════════════════
+//  LOGS - Smart Polling + Clear + Export
+// ════════════════════════════════════════════════════════
+async function pollRecentLogs() {
+  try {
+    const res = await fetch('/api/logs/recent');
+    if (!res.ok) return;
+    
+    const data = await res.json();
+    const list = document.getElementById('log-list');
+
+    if (data.length === 0) {
+      list.innerHTML = `<div class="empty-state">
+        <div class="big">📋</div>
+        <span>No attendance recorded yet</span>
+      </div>`;
+      document.getElementById('log-count').textContent = '0 entries';
+      return;
+    }
+
+    const empty = list.querySelector('.empty-state');
+    if (empty) empty.remove();
+
+    const existingIds = new Set(
+      Array.from(list.querySelectorAll('.log-entry'))
+        .map(el => el.dataset.id || '')
+    );
+
+    let added = 0;
+    for (const entry of data) {
+      const entryId = String(entry.id);
+      if (existingIds.has(entryId)) break;
+
+      const div = document.createElement('div');
+      div.className = 'log-entry';
+      div.dataset.id = entryId;
+      div.innerHTML = `
+        <span class="le-time">${entry.time}</span>
+        <span class="le-name">${entry.name}</span>
+        <span class="le-conf">${(+entry.confidence).toFixed(2)}</span>
+      `;
+      list.insertBefore(div, list.firstChild);
+      added++;
+      list.scrollTop = 0;
+    }
+
+    while (list.children.length > 50) {
+      list.removeChild(list.lastChild);
+    }
+
+    document.getElementById('log-count').textContent = `${data.length} entries`;
+  } catch (e) {
+    console.error('Log polling error:', e);
+  }
+}
+
+async function loadExistingLogs() {
+  await pollRecentLogs();
+}
+
+async function clearLogs() {
+  const ok = await confirmDialog('Clear Logs', 'Delete all attendance log entries? This cannot be undone.');
+  if (!ok) return;
+
+  try {
+    const res = await fetch('/api/logs', { method: 'DELETE' });
+    
+    if (res.ok) {
+      // Clear the UI immediately
+      document.getElementById('log-list').innerHTML = '';
+      document.getElementById('log-count').textContent = '0 entries';
+      toast('Logs cleared successfully');
+      
+      // Optional: refresh from server
+      setTimeout(pollRecentLogs, 300);
+    } else {
+      const errorData = await res.json().catch(() => ({}));
+      toast('Failed to clear logs: ' + (errorData.detail || 'Unknown error'), true);
+    }
+  } catch (e) {
+    console.error(e);
+    toast('Failed to clear logs (network error)', true);
+  }
+}
+
+async function exportLogs() {
+  window.location.href = '/api/logs/export';
+}
+
+// ════════════════════════════════════════════════════════
+//  FACE MANAGER
+// ════════════════════════════════════════════════════════
+async function refreshFaces() {
+  const res  = await fetch('/api/faces');
+  const data = await res.json();
+  const grid = document.getElementById('face-grid');
+
+  if (data.length === 0) {
+    grid.innerHTML = `<div class="empty-state">
+      <div class="big">⊞</div>
+      <span>No faces enrolled yet</span>
+    </div>`;
+    document.getElementById('enrolled-count').textContent = '0 people enrolled';
+    return;
+  }
+
+  grid.innerHTML = data.map(f => `
+    <div class="face-card" data-name="${f.name}" onclick="selectFace('${f.name}',this)">
+      <div class="fc-dot"></div>
+      <div class="fc-name">${f.name}</div>
+      <div class="fc-dims">${f.dims}D vector</div>
+    </div>
+  `).join('');
+
+  document.getElementById('enrolled-count').textContent = `${data.length} people enrolled`;
+}
+
+function selectFace(name, el) {
+  document.querySelectorAll('.face-card').forEach(c => c.classList.remove('selected'));
+  if (selectedFace === name) {
+    selectedFace = null;
+    document.getElementById('btn-update').disabled = true;
+    document.getElementById('btn-delete').disabled = true;
+  } else {
+    selectedFace = name;
+    el.classList.add('selected');
+    document.getElementById('btn-update').disabled = false;
+    document.getElementById('btn-delete').disabled = false;
+  }
+}
+
+// ════════════════════════════════════════════════════════
+//  ENROLLMENT
+// ════════════════════════════════════════════════════════
+async function openAddDialog() {
+  const name = await promptDialog('Add New Face', 'Enter the person\'s name:');
+  if (!name) return;
+  await openEnrollOverlay(name.trim(), 'add');
+}
+
+async function openUpdateDialog() {
+  if (!selectedFace) return;
+  const ok = await confirmDialog('Update Face', `Re-scan face for "${selectedFace}"?`);
+  if (!ok) return;
+  await openEnrollOverlay(selectedFace, 'update');
+}
+
+async function deleteFace() {
+  if (!selectedFace) return;
+
+  const ok = await confirmDialog('Delete Face',
+    `Remove "${selectedFace}" from the database? This cannot be undone.`);
+
+  if (!ok) return;
+
+  try {
+    const res = await fetch(`/api/faces/${encodeURIComponent(selectedFace)}`, { 
+      method: 'DELETE' 
+    });
+
+    if (res.ok) {
+      toast(`"${selectedFace}" deleted successfully`);
+      selectedFace = null;
+      document.getElementById('btn-update').disabled = true;
+      document.getElementById('btn-delete').disabled = true;
+      refreshFaces();           // Refresh the face grid
+    } else {
+      const errorData = await res.json().catch(() => ({}));
+      toast('Delete failed: ' + (errorData.detail || 'Unknown error'), true);
+    }
+  } catch (e) {
+    console.error(e);
+    toast('Delete failed (network error)', true);
+  }
+}
+
+async function openEnrollOverlay(name, mode) {
+  enrollPendingName = name;
+  enrollPendingMode = mode;
+  enrollCapturing = false;
+
+  document.getElementById('enroll-title').textContent = 
+    (mode === 'update' ? 'Update Face — ' : 'Add Face — ') + name;
+  document.getElementById('enroll-msg').textContent = 
+    `Position "${name}" in front of the camera, then click START CAPTURE.`;
+  document.getElementById('enroll-msg').className = '';
+  document.getElementById('enroll-progress-fill').style.width = '0%';
+  document.getElementById('enroll-confirm-btn').disabled = false;
+  document.getElementById('enroll-confirm-btn').textContent = '⬤ START CAPTURE';
+
+  const statusRes = await fetch('/api/camera/status');
+  const { running } = await statusRes.json();
+  if (!running) {
+    await fetch('/api/camera/start', { method: 'POST' });
+  }
+
+  document.getElementById('enroll-video').src = '/video_feed?' + Date.now();
+  document.getElementById('enroll-overlay').classList.add('show');
+}
+
+async function startEnrollCapture() {
+  if (enrollCapturing) return;
+  enrollCapturing = true;
+  document.getElementById('enroll-confirm-btn').disabled = true;
+  document.getElementById('enroll-confirm-btn').textContent = 'Capturing...';
+
+  const res = await fetch('/api/faces/enroll/start', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: enrollPendingName, mode: enrollPendingMode })
+  });
+
+  if (!res.ok) {
+    const err = await res.json();
+    document.getElementById('enroll-msg').textContent = err.detail || 'Error starting enrollment';
+    document.getElementById('enroll-msg').className = 'error';
+    document.getElementById('enroll-confirm-btn').disabled = false;
+    document.getElementById('enroll-confirm-btn').textContent = '⬤ START CAPTURE';
+    enrollCapturing = false;
+    return;
+  }
+
+  enrollPollInterval = setInterval(pollEnrollStatus, 200);
+}
+
+async function pollEnrollStatus() {
+  const res  = await fetch('/api/faces/enroll/status');
+  const data = await res.json();
+
+  const pct = data.total > 0 ? (data.count / data.total * 100) : 0;
+  document.getElementById('enroll-progress-fill').style.width = pct + '%';
+
+  const msgEl = document.getElementById('enroll-msg');
+  msgEl.textContent = data.message;
+
+  if (data.done) {
+    clearInterval(enrollPollInterval);
+    enrollPollInterval = null;
+
+    const isSuccess = data.message.startsWith('✓') || data.message.includes("successfully");
+
+    msgEl.className = isSuccess ? 'success' : 'error';
+
+    if (isSuccess) {
+      toast(data.message);
+      // Small delay then close overlay and refresh
+      setTimeout(() => {
+        closeEnrollOverlay();
+        refreshFaces();
+      }, 1500);
+    } else {
+      toast(data.message, true);
+      // Allow retry
+      document.getElementById('enroll-confirm-btn').disabled = false;
+      document.getElementById('enroll-confirm-btn').textContent = '↺ RETRY';
+      enrollCapturing = false;
+    }
+  }
+}
+async function cancelEnroll() {
+  if (enrollPollInterval) clearInterval(enrollPollInterval);
+  await fetch('/api/faces/enroll/cancel', { method: 'POST' });
+  closeEnrollOverlay();
+}
+
+function closeEnrollOverlay() {
+  document.getElementById('enroll-overlay').classList.remove('show');
+  document.getElementById('enroll-video').src = '';
+  enrollCapturing = false;
+}
+
+// ════════════════════════════════════════════════════════
+//  DIALOGS & TOAST
+// ════════════════════════════════════════════════════════
+function promptDialog(title, desc) {
+  return new Promise(resolve => {
+    dialogResolve = resolve;
+    document.getElementById('dialog-title').textContent = title;
+    document.getElementById('dialog-desc').textContent  = desc;
+    document.getElementById('dialog-input').value = '';
+    document.getElementById('dialog-overlay').classList.add('show');
+    setTimeout(() => document.getElementById('dialog-input').focus(), 50);
+  });
+}
+
+function dialogConfirm() {
+  const val = document.getElementById('dialog-input').value.trim();
+  document.getElementById('dialog-overlay').classList.remove('show');
+  if (dialogResolve) { dialogResolve(val || null); dialogResolve = null; }
+}
+
+function dialogCancel() {
+  document.getElementById('dialog-overlay').classList.remove('show');
+  if (dialogResolve) { dialogResolve(null); dialogResolve = null; }
+}
+
+function confirmDialog(title, msg) {
+  return new Promise(resolve => {
+    confirmResolve = resolve;
+    document.getElementById('confirm-title').textContent = title;
+    document.getElementById('confirm-msg').textContent   = msg;
+    document.getElementById('confirm-overlay').classList.add('show');
+  });
+}
+
+function confirmYes() {
+  document.getElementById('confirm-overlay').classList.remove('show');
+  if (confirmResolve) { confirmResolve(true); confirmResolve = null; }
+}
+
+function confirmNo() {
+  document.getElementById('confirm-overlay').classList.remove('show');
+  if (confirmResolve) { confirmResolve(false); confirmResolve = null; }
+}
+
+let toastTimer;
+function toast(msg, isError = false) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'show' + (isError ? ' error' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.className = '', 3000);
+}
+</script>
+</body>
+</html>
