@@ -158,6 +158,7 @@ class AntiSpoofClassifier:
         debug_crop_dir: Optional[str | os.PathLike[str]] = None,
         debug_crop_limit: int = 20,
         num_threads: int = DEFAULT_NUM_THREADS,
+        crop_margin: float = 0.2,
     ):
         self.model_path = resolve_model_path(model_path)
         self.threshold = float(threshold)
@@ -165,6 +166,9 @@ class AntiSpoofClassifier:
         self.debug_crop_limit = max(0, int(debug_crop_limit))
         self.debug_crop_count = 0
         self.num_threads = max(1, int(num_threads))
+        self.crop_margin = float(crop_margin)
+        if self.crop_margin < 0:
+            raise ValueError("anti-spoof crop margin must be greater than or equal to 0")
         if self.debug_crop_dir is not None:
             self.debug_crop_dir.mkdir(parents=True, exist_ok=True)
 
@@ -187,7 +191,12 @@ class AntiSpoofClassifier:
 
     def predict(self, frame, bbox: Sequence[float]) -> AntiSpoofResult:
         np = _load_numpy()
-        tensor = preprocess_face_crop(frame, bbox, input_size=self.input_size)
+        tensor = preprocess_face_crop(
+            frame,
+            bbox,
+            input_size=self.input_size,
+            margin=self.crop_margin,
+        )
         self._maybe_save_debug_crop(tensor)
         if self.input_dtype != np.float32:
             tensor = tensor.astype(self.input_dtype)

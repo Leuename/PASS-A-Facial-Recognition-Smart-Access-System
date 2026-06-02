@@ -7,10 +7,11 @@ from typing import Callable, Sequence
 import numpy as np
 
 
-DEFAULT_TOLERANCE = 0.35
+DEFAULT_TOLERANCE = 0.6
 DEFAULT_CV_SCALER = 4
 DEFAULT_DETECTION_MODEL = "hog"
 DEFAULT_ENCODING_MODEL = "large"
+DEFAULT_ANTI_SPOOF_BBOX_EXPANSION = 0.35
 
 
 def load_encodings(path: str | Path, missing_ok: bool = False):
@@ -136,6 +137,30 @@ def scaled_face_location_to_bbox(face_location, cv_scaler: int = DEFAULT_CV_SCAL
         int(top * cv_scaler),
         int(right * cv_scaler),
         int(bottom * cv_scaler),
+    ]
+
+
+def expand_bbox_to_frame(
+    bbox,
+    frame_shape,
+    expansion: float = DEFAULT_ANTI_SPOOF_BBOX_EXPANSION,
+):
+    expansion = float(expansion)
+    if expansion < 0:
+        raise ValueError("bbox expansion must be greater than or equal to 0")
+
+    frame_h, frame_w = frame_shape[:2]
+    x1, y1, x2, y2 = [int(value) for value in bbox[:4]]
+    box_w = max(0, x2 - x1)
+    box_h = max(0, y2 - y1)
+    pad_x = int(round(box_w * expansion))
+    pad_y = int(round(box_h * expansion))
+
+    return [
+        max(0, x1 - pad_x),
+        max(0, y1 - pad_y),
+        min(frame_w, x2 + pad_x),
+        min(frame_h, y2 + pad_y),
     ]
 
 

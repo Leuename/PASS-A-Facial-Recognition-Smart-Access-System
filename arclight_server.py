@@ -39,11 +39,13 @@ from anti_spoof import (
 )
 from arclight_face_recognition import (
     DEFAULT_CV_SCALER,
+    DEFAULT_ANTI_SPOOF_BBOX_EXPANSION,
     DEFAULT_DETECTION_MODEL,
     DEFAULT_ENCODING_MODEL,
     DEFAULT_TOLERANCE,
     delete_person as delete_person_encodings,
     detect_and_encode_faces,
+    expand_bbox_to_frame,
     list_people,
     load_encodings,
     match_face,
@@ -70,6 +72,10 @@ ANTI_SPOOF_MODEL = os.getenv("ARCLIGHT_ANTI_SPOOF_MODEL", str(DEFAULT_ANTI_SPOOF
 ANTI_SPOOF_THRESHOLD = float(os.getenv("ARCLIGHT_ANTI_SPOOF_THRESHOLD", str(DEFAULT_ANTI_SPOOF_THRESHOLD)))
 ANTI_SPOOF_SHOW_SCORE = parse_bool_env("ARCLIGHT_ANTI_SPOOF_SHOW_SCORE", False)
 ANTI_SPOOF_THREADS = int(os.getenv("ARCLIGHT_ANTI_SPOOF_THREADS", "2"))
+ANTI_SPOOF_BBOX_EXPANSION = float(
+    os.getenv("ARCLIGHT_ANTI_SPOOF_BBOX_EXPANSION", str(DEFAULT_ANTI_SPOOF_BBOX_EXPANSION))
+)
+ANTI_SPOOF_CROP_MARGIN = float(os.getenv("ARCLIGHT_ANTI_SPOOF_CROP_MARGIN", "0.2"))
 # ─────────────────────────────────────────────────────────────────────────
 
 # ── GLOBALS ───────────────────────────────────────────────────────────────
@@ -150,9 +156,15 @@ async def lifespan(app: FastAPI):
                 model_path=ANTI_SPOOF_MODEL,
                 threshold=ANTI_SPOOF_THRESHOLD,
                 num_threads=ANTI_SPOOF_THREADS,
+                crop_margin=ANTI_SPOOF_CROP_MARGIN,
             )
             anti_spoof_error = None
-            print(f"  Anti-spoofing loaded at threshold {ANTI_SPOOF_THRESHOLD:.2f}.")
+            print(
+                "  Anti-spoofing loaded at "
+                f"threshold {ANTI_SPOOF_THRESHOLD:.2f}, "
+                f"bbox expansion {ANTI_SPOOF_BBOX_EXPANSION:.2f}, "
+                f"crop margin {ANTI_SPOOF_CROP_MARGIN:.2f}."
+            )
         except Exception as exc:
             anti_spoof_classifier = None
             anti_spoof_error = str(exc)
@@ -293,9 +305,14 @@ async def generate_frames():
                 accepted_known = False
 
                 if name != "Unknown":
+                    anti_spoof_bbox = expand_bbox_to_frame(
+                        [x1, y1, x2, y2],
+                        frame.shape,
+                        ANTI_SPOOF_BBOX_EXPANSION,
+                    )
                     liveness = evaluate_liveness(
                         frame,
-                        [x1, y1, x2, y2],
+                        anti_spoof_bbox,
                         anti_spoof_classifier,
                         enabled=ANTI_SPOOF_ENABLED,
                         fail_closed=ANTI_SPOOF_FAIL_CLOSED,
@@ -362,6 +379,7 @@ def _enroll_tick(frame):
     )
     if face_locations and face_encodings:
         bbox = scaled_face_location_to_bbox(face_locations[0], FACE_CV_SCALER)
+        bbox = expand_bbox_to_frame(bbox, frame.shape, ANTI_SPOOF_BBOX_EXPANSION)
         liveness = evaluate_liveness(
             frame,
             bbox,
@@ -454,6 +472,8 @@ async def camera_status():
         "anti_spoof_ready": anti_spoof_classifier is not None,
         "anti_spoof_fail_closed": ANTI_SPOOF_FAIL_CLOSED,
         "anti_spoof_error": anti_spoof_error,
+        "anti_spoof_bbox_expansion": ANTI_SPOOF_BBOX_EXPANSION,
+        "anti_spoof_crop_margin": ANTI_SPOOF_CROP_MARGIN,
     }
 
 # ── Faces CRUD ────────────────────────────────────────────────────────────

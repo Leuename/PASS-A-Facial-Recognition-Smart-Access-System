@@ -43,4 +43,11 @@ export ARCLIGHT_FACE_DETECTION_MODEL=hog
 export ARCLIGHT_FACE_ENCODING_MODEL=large
 export ARCLIGHT_ANTI_SPOOF_THRESHOLD=0.35
 export ARCLIGHT_ANTI_SPOOF_THREADS=2
+export ARCLIGHT_ANTI_SPOOF_BBOX_EXPANSION=0.35
+export ARCLIGHT_ANTI_SPOOF_CROP_MARGIN=0.2
 ```
+
+Anti-spoof bounding-box tuning:
+
+- `ARCLIGHT_ANTI_SPOOF_BBOX_EXPANSION` expands the detected face box before it is sent to anti-spoofing, matching the Windows testing behavior. Set `0` to disable this outer expansion.
+- `ARCLIGHT_ANTI_SPOOF_CROP_MARGIN` controls the inner crop margin used by the anti-spoof model preprocessor. Set `0` to crop exactly the incoming bbox.
