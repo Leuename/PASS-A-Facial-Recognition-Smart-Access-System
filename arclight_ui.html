@@ -783,6 +783,15 @@ let enrollPendingName = null;
 let enrollCapturing = false;
 let logPollInterval = null;
 
+async function responseErrorMessage(res, fallback) {
+  try {
+    const data = await res.json();
+    return data.detail || data.message || fallback;
+  } catch (e) {
+    return fallback;
+  }
+}
+
 // ════════════════════════════════════════════════════════
 //  INIT
 // ════════════════════════════════════════════════════════
@@ -808,7 +817,7 @@ function switchPanel(id, btn) {
 async function startCamera() {
   const res = await fetch('/api/camera/start', { method: 'POST' });
   if (!res.ok) { 
-    toast('Failed to open camera', true); 
+    toast(await responseErrorMessage(res, 'Failed to open camera'), true); 
     return; 
   }
 
@@ -1033,9 +1042,21 @@ async function openEnrollOverlay(name, mode) {
   document.getElementById('enroll-confirm-btn').textContent = '⬤ START CAPTURE';
 
   const statusRes = await fetch('/api/camera/status');
+  if (!statusRes.ok) {
+    const msg = await responseErrorMessage(statusRes, 'Failed to check camera status');
+    toast(msg, true);
+    return;
+  }
   const { running } = await statusRes.json();
   if (!running) {
-    await fetch('/api/camera/start', { method: 'POST' });
+    const startRes = await fetch('/api/camera/start', { method: 'POST' });
+    if (!startRes.ok) {
+      const msg = await responseErrorMessage(startRes, 'Failed to open camera');
+      document.getElementById('enroll-msg').textContent = msg;
+      document.getElementById('enroll-msg').className = 'error';
+      toast(msg, true);
+      return;
+    }
   }
 
   document.getElementById('enroll-video').src = '/video_feed?' + Date.now();
@@ -1055,11 +1076,12 @@ async function startEnrollCapture() {
   });
 
   if (!res.ok) {
-    const err = await res.json();
-    document.getElementById('enroll-msg').textContent = err.detail || 'Error starting enrollment';
+    const msg = await responseErrorMessage(res, 'Error starting enrollment');
+    document.getElementById('enroll-msg').textContent = msg;
     document.getElementById('enroll-msg').className = 'error';
     document.getElementById('enroll-confirm-btn').disabled = false;
     document.getElementById('enroll-confirm-btn').textContent = '⬤ START CAPTURE';
+    toast(msg, true);
     enrollCapturing = false;
     return;
   }

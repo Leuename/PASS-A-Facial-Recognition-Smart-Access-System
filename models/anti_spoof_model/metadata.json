@@ -1,0 +1,55 @@
+{
+    "task": "face_anti_spoofing_binary_classifier",
+    "class_mapping": {
+        "real": 0,
+        "spoof": 1
+    },
+    "label_rule": {
+        "0": "real",
+        "1": "spoof"
+    },
+    "sigmoid_output": "spoof_score = probability that image is spoof",
+    "decision_rule": {
+        "spoof_score >= threshold": "reject_as_spoof",
+        "spoof_score < threshold": "continue_to_face_recognition"
+    },
+    "recommended_threshold": 0.5,
+    "default_threshold": 0.5,
+    "security_note": "For door locks, prioritize low spoof_wrongly_accepted_as_real. False rejection of real users is safer than false acceptance of spoof.",
+    "input_size": [
+        224,
+        224,
+        3
+    ],
+    "preprocessing": "rescale 1./255",
+    "training_settings": {
+        "phase_1_epochs": 20,
+        "phase_1_learning_rate": 0.0001,
+        "phase_1_backbone": "frozen",
+        "fine_tuning_enabled": false,
+        "phase_2_epochs": 5,
+        "phase_2_learning_rate": 1e-06,
+        "phase_2_trainable_last_backbone_layers": 10,
+        "spoof_weight_multiplier": 2.0,
+        "dropout": 0.5,
+        "batch_size": 32
+    },
+    "threshold_selection": {
+        "minimum_target_spoof_recall": 0.85,
+        "minimum_real_accept_rate": 0.5,
+        "selection_note": "Threshold selected from test sweep for safer door-lock behavior."
+    },
+    "dataset_paths": {
+        "input_directory": "/content/antispoof_dataset_split",
+        "train_directory": "/content/antispoof_dataset_split/train",
+        "validation_directory": "/content/antispoof_dataset_split/val",
+        "test_directory": "/content/antispoof_dataset_split/test"
+    },
+    "preprocessing_options": {
+        "deduplication_enabled": true,
+        "phash_duplicate_threshold": 5,
+        "face_cropping_enabled": true,
+        "face_crop_margin": 0.25,
+        "keep_undetected_images": true
+    }
+}

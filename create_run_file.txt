@@ -1,0 +1,64 @@
+# Create the run.sh file
+cat << 'EOF' > run.sh
+#!/bin/bash
+# Arclight Face Recognition System - Startup Script for Raspberry Pi
+
+set -e
+
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+VENV_DIR="$PROJECT_DIR/venv"
+
+# Change this if your Raspberry Pi camera is exposed through a different
+# V4L2 device or GStreamer/libcamera pipeline.
+export CAMERA_SOURCE="${CAMERA_SOURCE:-0}"
+
+echo "========================================"
+echo "     ARCLIGHT FACE RECOGNITION SYSTEM"
+echo "========================================"
+
+# Go to project directory
+if [ -d "$PROJECT_DIR" ]; then
+    cd "$PROJECT_DIR"
+else
+    echo "ERROR: Project directory not found: $PROJECT_DIR"
+    exit 1
+fi
+
+# Activate virtual environment
+if [ -f "$VENV_DIR/bin/activate" ]; then
+    source "$VENV_DIR/bin/activate"
+    echo "Virtual environment activated: $VENV_DIR"
+else
+    echo "ERROR: Virtual environment not found: $VENV_DIR"
+    echo "Expected Raspberry Pi virtual environment folder name: venv"
+    exit 1
+fi
+
+# Check if main file exists
+if [ ! -f "arclight_server.py" ]; then
+    echo "ERROR: arclight_server.py not found in $PROJECT_DIR"
+    exit 1
+fi
+
+PI_IP="$(hostname -I | awk '{print $1}')"
+if [ -z "$PI_IP" ]; then
+    PI_IP="127.0.0.1"
+fi
+
+echo "Starting Arclight Server..."
+echo "You can access the UI at: http://$PI_IP:8000"
+echo "Press Ctrl + C to stop the server"
+echo "----------------------------------------"
+
+# Start the FastAPI server
+exec uvicorn arclight_server:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --workers 1 \
+    --log-level info
+EOF
+
+# Make it executable
+chmod +x run.sh
+
+echo "run.sh created successfully at $(pwd)/run.sh"

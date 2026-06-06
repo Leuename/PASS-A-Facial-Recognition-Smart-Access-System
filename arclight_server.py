@@ -1,12 +1,17 @@
 import cv2
+import numpy as np
 import sqlite3
 import os
+import sys
 import asyncio
+import json
 import io
 import time
+import traceback
 from pathlib import Path
 from datetime import datetime
 from contextlib import asynccontextmanager
+from typing import Optional
 
 
 import RPi.GPIO as GPIO
@@ -24,68 +29,35 @@ GPIO.output(BUTTON_LED, GPIO.LOW)
 
 # Directory where this script lives — HTML must be here too
 BASE_DIR = Path(__file__).parent
+ANTI_SPOOF_DIR = BASE_DIR / "models" / "anti_spoof_model"
 
-import face_recognition
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from insightface.app import FaceAnalysis
 import pandas as pd
-from anti_spoof import (
-    AntiSpoofClassifier,
-    DEFAULT_MODEL_PATH as DEFAULT_ANTI_SPOOF_MODEL_PATH,
-    DEFAULT_THRESHOLD as DEFAULT_ANTI_SPOOF_THRESHOLD,
-    evaluate_liveness,
-    parse_bool_env,
-)
-from arclight_face_recognition import (
-    DEFAULT_CV_SCALER,
-    DEFAULT_ANTI_SPOOF_BBOX_EXPANSION,
-    DEFAULT_DETECTION_MODEL,
-    DEFAULT_ENCODING_MODEL,
-    DEFAULT_TOLERANCE,
-    delete_person as delete_person_encodings,
-    detect_and_encode_faces,
-    expand_bbox_to_frame,
-    list_people,
-    load_encodings,
-    match_face,
-    match_faces,
-    save_encodings,
-    scaled_face_location_to_bbox,
-    upsert_person,
-)
+from anti_spoofing import AntiSpoofClassifier
+
 
 
 # ── CONFIG ───────────────────────────────────────────────────────────────
-ENCODINGS_FILE = Path(os.getenv("ARCLIGHT_ENCODINGS_FILE", str(BASE_DIR / "encodings.pickle")))
-DB_FILE      = Path(os.getenv("ARCLIGHT_ATTENDANCE_DB", str(BASE_DIR / "attendance.db")))
-DATASET      = Path(os.getenv("ARCLIGHT_DATASET_DIR", str(BASE_DIR / "Faces4Arclight")))
-FACE_RECOGNITION_TOLERANCE = float(os.getenv("ARCLIGHT_RECOGNITION_TOLERANCE", str(DEFAULT_TOLERANCE)))
-FACE_CV_SCALER = int(os.getenv("ARCLIGHT_FACE_CV_SCALER", str(DEFAULT_CV_SCALER)))
-FACE_DETECTION_MODEL = os.getenv("ARCLIGHT_FACE_DETECTION_MODEL", DEFAULT_DETECTION_MODEL)
-FACE_ENCODING_MODEL = os.getenv("ARCLIGHT_FACE_ENCODING_MODEL", DEFAULT_ENCODING_MODEL)
+DATABASE     = str(BASE_DIR / "face_database.npy")
+DB_FILE      = str(BASE_DIR / "attendance.db")
+DATASET      = str(BASE_DIR / "Faces4Arclight")
+CAMERA_SOURCE = os.getenv("CAMERA_SOURCE", "0")
+CONFIDENCE   = 0.50
 COOLDOWN_SEC = 5
 ENROLL_FRAMES = 30
-ANTI_SPOOF_ENABLED = parse_bool_env("ARCLIGHT_ANTI_SPOOF_ENABLED", True)
-ANTI_SPOOF_FAIL_CLOSED = parse_bool_env("ARCLIGHT_ANTI_SPOOF_FAIL_CLOSED", True)
-ANTI_SPOOF_MODEL = os.getenv("ARCLIGHT_ANTI_SPOOF_MODEL", str(DEFAULT_ANTI_SPOOF_MODEL_PATH))
-ANTI_SPOOF_THRESHOLD = float(os.getenv("ARCLIGHT_ANTI_SPOOF_THRESHOLD", str(DEFAULT_ANTI_SPOOF_THRESHOLD)))
-ANTI_SPOOF_SHOW_SCORE = parse_bool_env("ARCLIGHT_ANTI_SPOOF_SHOW_SCORE", False)
-ANTI_SPOOF_THREADS = int(os.getenv("ARCLIGHT_ANTI_SPOOF_THREADS", "2"))
-ANTI_SPOOF_BBOX_EXPANSION = float(
-    os.getenv("ARCLIGHT_ANTI_SPOOF_BBOX_EXPANSION", str(DEFAULT_ANTI_SPOOF_BBOX_EXPANSION))
-)
-ANTI_SPOOF_CROP_MARGIN = float(os.getenv("ARCLIGHT_ANTI_SPOOF_CROP_MARGIN", "0.2"))
 # ─────────────────────────────────────────────────────────────────────────
 
 # ── GLOBALS ───────────────────────────────────────────────────────────────
-known_face_encodings = []
-known_face_names = []
+arc         = None
+anti_spoof = None
+face_db     = {}
 cap         = None
 is_running  = False
 last_seen   = {}
-anti_spoof_classifier = None
-anti_spoof_error = None
 enroll_state = {
     "active": False,
     "name": None,
@@ -142,36 +114,20 @@ ws_manager = ConnectionManager()
 # ── STARTUP / SHUTDOWN ────────────────────────────────────────────────────
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global known_face_encodings, known_face_names, anti_spoof_classifier, anti_spoof_error
-    print("Loading face_recognition encodings...")
-    known_face_encodings, known_face_names = load_encodings(ENCODINGS_FILE, missing_ok=True)
-    people_count = len(set(known_face_names))
-    print(f"  {people_count} people loaded from {len(known_face_names)} samples.")
-    init_db()
-
-    if ANTI_SPOOF_ENABLED:
-        print("Loading anti-spoofing...")
-        try:
-            anti_spoof_classifier = AntiSpoofClassifier(
-                model_path=ANTI_SPOOF_MODEL,
-                threshold=ANTI_SPOOF_THRESHOLD,
-                num_threads=ANTI_SPOOF_THREADS,
-                crop_margin=ANTI_SPOOF_CROP_MARGIN,
-            )
-            anti_spoof_error = None
-            print(
-                "  Anti-spoofing loaded at "
-                f"threshold {ANTI_SPOOF_THRESHOLD:.2f}, "
-                f"bbox expansion {ANTI_SPOOF_BBOX_EXPANSION:.2f}, "
-                f"crop margin {ANTI_SPOOF_CROP_MARGIN:.2f}."
-            )
-        except Exception as exc:
-            anti_spoof_classifier = None
-            anti_spoof_error = str(exc)
-            mode = "fail-closed" if ANTI_SPOOF_FAIL_CLOSED else "fail-open"
-            print(f"  Anti-spoofing unavailable ({mode}): {anti_spoof_error}")
+    global arc, anti_spoof, face_db
+    print("Loading anti-spoof model...")
+    anti_spoof = AntiSpoofClassifier(ANTI_SPOOF_DIR)
+    if anti_spoof.ready:
+        print(f"  Anti-spoof ready. threshold={anti_spoof.threshold:.2f}")
     else:
-        print("Anti-spoofing disabled by ARCLIGHT_ANTI_SPOOF_ENABLED.")
+        print(f"  Anti-spoof unavailable: {anti_spoof.error}")
+
+    print("Loading ArcFace...")
+    arc = FaceAnalysis(allowed_modules=['detection', 'recognition'])
+    arc.prepare(ctx_id=-1)
+    face_db = load_database()
+    print(f"  {len(face_db)} people loaded.")
+    init_db()
     
     # Start button monitor in background
     import threading
@@ -184,9 +140,30 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 
+def get_anti_spoof_status():
+    if anti_spoof is None:
+        return {
+            "ready": False,
+            "threshold": 0.5,
+            "model_dir": str(ANTI_SPOOF_DIR),
+            "error": "Anti-spoof classifier has not been loaded",
+        }
+    return anti_spoof.status()
+
+def require_anti_spoof_ready():
+    status = get_anti_spoof_status()
+    if not status["ready"]:
+        detail = status.get("error") or "Anti-spoof classifier is unavailable"
+        raise HTTPException(status_code=503, detail=f"Anti-spoof unavailable: {detail}")
+
 # ── DATABASE HELPERS ──────────────────────────────────────────────────────
-def save_known_faces():
-    save_encodings(ENCODINGS_FILE, known_face_encodings, known_face_names)
+def load_database():
+    if os.path.exists(DATABASE):
+        return np.load(DATABASE, allow_pickle=True).item()
+    return {}
+
+def save_database(db):
+    np.save(DATABASE, db)
 
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -201,14 +178,20 @@ def init_db():
     conn.commit()
     conn.close()
 
+def open_camera():
+    source = int(CAMERA_SOURCE) if CAMERA_SOURCE.isdigit() else CAMERA_SOURCE
+    return cv2.VideoCapture(source)
+
 # ── RECOGNITION ───────────────────────────────────────────────────────────
 def recognize(embedding):
-    return match_face(
-        embedding,
-        known_face_encodings,
-        known_face_names,
-        tolerance=FACE_RECOGNITION_TOLERANCE,
-    )
+    best_name, best_score = "Unknown", -1.0
+    for name, known_emb in face_db.items():
+        score = float(np.dot(embedding, known_emb) / (
+            np.linalg.norm(embedding) * np.linalg.norm(known_emb)))
+        if score > best_score:
+            best_score = score
+            best_name  = name
+    return (best_name if best_score >= CONFIDENCE else "Unknown"), best_score
 
 def log_entry_sync(name, confidence):
     if name == "Unknown":
@@ -280,71 +263,36 @@ async def generate_frames():
             await asyncio.sleep(0.03)
             continue
 
-        face_locations, face_encodings = detect_and_encode_faces(
-            frame,
-            cv2,
-            face_recognition,
-            cv_scaler=FACE_CV_SCALER,
-            detection_model=FACE_DETECTION_MODEL,
-            encoding_model=FACE_ENCODING_MODEL,
-        )
-        matches = match_faces(
-            face_encodings,
-            known_face_encodings,
-            known_face_names,
-            tolerance=FACE_RECOGNITION_TOLERANCE,
-        )
+        faces = arc.get(frame)
 
-        if face_locations:
+        if faces:
             known_detected = False
-            for face_location, (name, score) in zip(face_locations, matches):
-                x1, y1, x2, y2 = scaled_face_location_to_bbox(face_location, FACE_CV_SCALER)
-                liveness = None
-                display_name = name
-                display_text = f"{display_name}  {score:.2f}"
-                accepted_known = False
+            for face in faces:
+                bbox = face.bbox.astype(int)
+                x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+                liveness = anti_spoof.predict(frame, (x1, y1, x2, y2)) if anti_spoof else None
+                if liveness is None or not liveness.is_real:
+                    color = (0, 0, 255)
+                    spoof_score = liveness.spoof_score if liveness else 1.0
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+                    cv2.putText(frame, f"Spoof  {spoof_score:.2f}",
+                                (x1, max(y1 - 8, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
+                    continue
+
+                name, score = recognize(face.embedding)
+                log_data = log_entry_sync(name, score)
+                if log_data:
+                    asyncio.create_task(ws_manager.broadcast(log_data))
 
                 if name != "Unknown":
-                    anti_spoof_bbox = expand_bbox_to_frame(
-                        [x1, y1, x2, y2],
-                        frame.shape,
-                        ANTI_SPOOF_BBOX_EXPANSION,
-                    )
-                    liveness = evaluate_liveness(
-                        frame,
-                        anti_spoof_bbox,
-                        anti_spoof_classifier,
-                        enabled=ANTI_SPOOF_ENABLED,
-                        fail_closed=ANTI_SPOOF_FAIL_CLOSED,
-                        unavailable_reason=anti_spoof_error,
-                        show_score=ANTI_SPOOF_SHOW_SCORE,
-                    )
-                    if liveness.is_live:
-                        accepted_known = True
-                        if ANTI_SPOOF_SHOW_SCORE and liveness.spoof_score is not None:
-                            display_name = f"{name} S:{liveness.spoof_score:.2f}"
-                            display_text = f"{display_name}  {score:.2f}"
-                        log_data = log_entry_sync(name, score)
-                        if log_data:
-                            asyncio.create_task(ws_manager.broadcast(log_data))
-                    else:
-                        display_name = (
-                            "Anti-spoof unavailable"
-                            if liveness.reason == "anti_spoof_unavailable"
-                            else liveness.label
-                        )
-                        display_text = display_name
-
-                if accepted_known:
                     known_detected = True
                     color = (0, 255, 136)
-                elif liveness is not None and not liveness.is_live:
-                    color = (0, 0, 255)
                 else:
                     color = (0, 80, 255)
 
                 cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, display_text,
+                cv2.putText(frame, f"{name}  {score:.2f}",
                             (x1, max(y1 - 8, 12)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 2)
 
@@ -369,52 +317,35 @@ def _enroll_tick(frame):
     """Accumulate embeddings during enrollment (called from frame loop)."""
     if enroll_state["count"] >= ENROLL_FRAMES:
         return
-    face_locations, face_encodings = detect_and_encode_faces(
-        frame,
-        cv2,
-        face_recognition,
-        cv_scaler=FACE_CV_SCALER,
-        detection_model=FACE_DETECTION_MODEL,
-        encoding_model=FACE_ENCODING_MODEL,
-    )
-    if face_locations and face_encodings:
-        bbox = scaled_face_location_to_bbox(face_locations[0], FACE_CV_SCALER)
-        bbox = expand_bbox_to_frame(bbox, frame.shape, ANTI_SPOOF_BBOX_EXPANSION)
-        liveness = evaluate_liveness(
-            frame,
-            bbox,
-            anti_spoof_classifier,
-            enabled=ANTI_SPOOF_ENABLED,
-            fail_closed=ANTI_SPOOF_FAIL_CLOSED,
-            unavailable_reason=anti_spoof_error,
-            show_score=ANTI_SPOOF_SHOW_SCORE,
-        )
-        if not liveness.is_live:
-            enroll_state["message"] = liveness.label
+    faces = arc.get(frame)
+    if faces:
+        face = faces[0]
+        bbox = face.bbox.astype(int)
+        x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+        liveness = anti_spoof.predict(frame, (x1, y1, x2, y2)) if anti_spoof else None
+        if liveness is None or not liveness.is_real:
+            spoof_score = liveness.spoof_score if liveness else 1.0
+            enroll_state["message"] = f"Spoof rejected ({spoof_score:.2f}). Use a real face."
             return
 
-        enroll_state["embeddings"].append(face_encodings[0])
+        enroll_state["embeddings"].append(face.embedding)
         enroll_state["count"] += 1
         enroll_state["message"] = f"Captured {enroll_state['count']}/{ENROLL_FRAMES}"
         if enroll_state["count"] >= ENROLL_FRAMES:
             _finish_enrollment()
 
 def _finish_enrollment():
-    global known_face_encodings, known_face_names
+    global face_db
     embs = enroll_state["embeddings"]
     if len(embs) >= 10:
-        known_face_encodings, known_face_names = upsert_person(
-            known_face_encodings,
-            known_face_names,
-            enroll_state["name"],
-            embs,
-        )
-        save_known_faces()
+        avg = np.mean(embs, axis=0)
+        face_db[enroll_state["name"]] = avg
+        save_database(face_db)
         enroll_state["done"] = True          # ← moved up, before folder ops
         action = "updated" if enroll_state["mode"] == "update" else "added"
         enroll_state["message"] = f"✓ '{enroll_state['name']}' {action} successfully!"
-        folder = DATASET / enroll_state["name"]
-        folder.mkdir(parents=True, exist_ok=True)
+        folder = os.path.join(DATASET, enroll_state["name"])
+        os.makedirs(folder, exist_ok=True)
     else:
         enroll_state["done"] = True
         enroll_state["message"] = "✗ Not enough faces detected. Try again."
@@ -446,9 +377,10 @@ async def video_feed():
 @app.post("/api/camera/start")
 async def start_camera():
     global cap, is_running, last_seen
+    require_anti_spoof_ready()
     if is_running:
         return {"status": "already running"}
-    cap = cv2.VideoCapture(0)
+    cap = open_camera()
     if not cap.isOpened():
         raise HTTPException(status_code=500, detail="Cannot open camera")
     is_running = True
@@ -466,20 +398,19 @@ async def stop_camera():
 
 @app.get("/api/camera/status")
 async def camera_status():
-    return {
-        "running": is_running,
-        "anti_spoof_enabled": ANTI_SPOOF_ENABLED,
-        "anti_spoof_ready": anti_spoof_classifier is not None,
-        "anti_spoof_fail_closed": ANTI_SPOOF_FAIL_CLOSED,
-        "anti_spoof_error": anti_spoof_error,
-        "anti_spoof_bbox_expansion": ANTI_SPOOF_BBOX_EXPANSION,
-        "anti_spoof_crop_margin": ANTI_SPOOF_CROP_MARGIN,
-    }
+    return {"running": is_running, "anti_spoof": get_anti_spoof_status()}
+
+@app.get("/api/anti-spoof/status")
+async def anti_spoof_status():
+    return get_anti_spoof_status()
 
 # ── Faces CRUD ────────────────────────────────────────────────────────────
 @app.get("/api/faces")
 async def list_faces():
-    return list_people(known_face_encodings, known_face_names)
+    return [
+        {"name": name, "dims": int(emb.shape[0])}
+        for name, emb in sorted(face_db.items())
+    ]
 
 class EnrollRequest(BaseModel):
     name: str
@@ -488,11 +419,15 @@ class EnrollRequest(BaseModel):
 @app.post("/api/faces/enroll/start")
 async def enroll_start(req: EnrollRequest):
     global cap, is_running
+    require_anti_spoof_ready()
     name = req.name.strip()
-    if req.mode == "add" and name in set(known_face_names):
+    if req.mode == "add" and name in face_db:
         raise HTTPException(400, f"'{name}' already exists. Use update mode.")
     if not is_running:
-        cap = cv2.VideoCapture(0)
+        cap = open_camera()
+        if not cap.isOpened():
+            cap = None
+            raise HTTPException(status_code=500, detail="Cannot open camera")
         is_running = True
     enroll_state.update({
         "active": True, "name": name, "mode": req.mode,
@@ -519,17 +454,13 @@ async def enroll_cancel():
 
 @app.delete("/api/faces/{name}")
 async def delete_face(name: str):
-    global known_face_encodings, known_face_names
-    known_face_encodings, known_face_names, removed = delete_person_encodings(
-        known_face_encodings,
-        known_face_names,
-        name,
-    )
-    if not removed:
+    global face_db
+    if name not in face_db:
         raise HTTPException(404, f"'{name}' not found")
-    save_known_faces()
-    folder = DATASET / name
-    if folder.exists():
+    del face_db[name]
+    save_database(face_db)
+    folder = os.path.join(DATASET, name)
+    if os.path.exists(folder):
         import shutil
         shutil.rmtree(folder)
     return {"status": "deleted", "name": name}
